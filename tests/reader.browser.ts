@@ -29,7 +29,20 @@ test('upload, select a passage, follow up, quiz, navigate and resume', async ({ 
       document.dispatchEvent(new Event('selectionchange'));
     });
   await expect(page.getByRole('button', { name: 'Explain selection' })).toBeVisible();
+  // Hold the request briefly so the busy state of the selection bar is observable.
+  await page.route(
+    '**/api/papers/*/ask',
+    async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await route.continue();
+    },
+    { times: 1 },
+  );
   await page.getByRole('button', { name: 'Explain selection' }).click();
+  // On phones the paper panel is hidden as soon as the question is sent; the button still exists.
+  await expect(
+    page.getByRole('button', { name: 'Answering…', includeHidden: true }),
+  ).toBeDisabled();
   await expect(page.locator('.message.assistant')).toHaveCount(1, { timeout: 15000 });
   await expect(page.locator('.message.assistant')).toContainText('one-dimensional subspace');
   await expect(page.locator('.katex').first()).toBeVisible();
@@ -105,6 +118,7 @@ test('a rejected request keeps the typed question in the composer', async ({ pag
     'Please keep this question if the connection fails.',
   );
   await expect(page.getByRole('alert')).toContainText('temporarily unavailable');
+  await expect(page.getByRole('alert')).toHaveCount(1);
 });
 
 test('cross-page highlights keep their source range; reply styles persist and long answers expand', async ({

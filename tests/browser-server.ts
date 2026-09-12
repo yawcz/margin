@@ -10,4 +10,4 @@ const { app } = createApp({
 });
 app.use(express.static(resolve('dist')));
 app.get('/{*path}', (_req, res) => res.sendFile(resolve('dist/index.html')));
-app.listen(4318, '127.0.0.1');
+app.listen(Number(process.env.PORT || 4318), '127.0.0.1');

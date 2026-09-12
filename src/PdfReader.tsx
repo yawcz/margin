@@ -15,6 +15,7 @@ export default function PdfReader({
   onNavigate,
   selection,
   onSelection,
+  asking,
   onExplain,
 }: {
   paper: Paper;
@@ -24,6 +25,7 @@ export default function PdfReader({
   onNavigate: (page: number) => void;
   selection: Passage | null;
   onSelection: (selection: Passage | null) => void;
+  asking: boolean;
   onExplain: () => void;
 }) {
   const [error, setError] = useState('');
@@ -97,17 +99,32 @@ export default function PdfReader({
       });
     let lastWidth = 0;
     const observer = new ResizeObserver(() => {
-      if (!root.clientWidth) return; // A hidden phone panel must not resize the PDF to zero.
+      if (!root.clientWidth) {
+        // A hidden phone panel must not resize the PDF to zero; remember that it was hidden.
+        lastWidth = 0;
+        return;
+      }
       cancelAnimationFrame(resizeFrame);
       resizeFrame = requestAnimationFrame(() => {
+        if (!root.clientWidth) return;
+        // display:none resets the scroll position, but PDF.js still holds the pre-hide location
+        // (page + offset in PDF units) until its next update, so capture it before refitting.
+        const hidden = lastWidth === 0 ? reader._location : null;
         if (root.clientWidth !== lastWidth) {
           lastWidth = root.clientWidth;
-          fit.current();
+          fit.current(); // A scale change re-scrolls to the saved location by itself.
         }
-        if (ready) {
-          reader.currentPageNumber = current.current.page;
-          reader.update();
-        }
+        if (!ready) return;
+        if (hidden)
+          reader.scrollPageIntoView({
+            pageNumber: hidden.pageNumber,
+            destArray: [null, { name: 'XYZ' }, hidden.left, hidden.top, null],
+            allowNegativeOffset: true,
+            ignoreDestinationZoom: true,
+          });
+        // Height-only changes (keyboard, address bar) must not jump to the page top; update()
+        // only renders newly exposed pages and never scrolls.
+        reader.update();
       });
     });
     observer.observe(root);
@@ -254,8 +271,8 @@ export default function PdfReader({
               {selection.text.length > 70 ? '…' : ''}
             </span>
           </span>
-          <button className="primary small" onClick={onExplain}>
-            Explain selection
+          <button className="primary small" disabled={asking} onClick={onExplain}>
+            {asking ? 'Answering…' : 'Explain selection'}
           </button>
           <button
             className="icon-button"

@@ -20,7 +20,8 @@ export async function importPdf(
     path = join(store.dir, 'papers', id + '.pdf');
   await writeFile(path, buffer, { mode: 0o600 });
   try {
-    const { stdout } = await exec('pdftotext', ['-layout', path, '-'], {
+    // Reading-order extraction: -layout interleaves the columns of two-column papers line by line.
+    const { stdout } = await exec('pdftotext', [path, '-'], {
       maxBuffer: 12 * 1024 * 1024,
       timeout: 30000,
     });
@@ -56,8 +57,15 @@ export async function importPdf(
     return paper;
   } catch (e) {
     await unlink(path).catch(() => {});
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT')
+    const failure = e as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+    if (failure.code === 'ENOENT')
       throw new Error('PDF tools are missing on the server. Install poppler-utils.');
+    if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+      throw new Error(
+        'This PDF contains more text than Margin can import (12 MB). Try a shorter document.',
+      );
+    if (failure.killed || failure.signal)
+      throw new Error('Reading this PDF took too long. Try a smaller or simpler copy.');
     throw e;
   }
 }

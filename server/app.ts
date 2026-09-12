@@ -21,6 +21,8 @@ export function createApp(options: Options) {
   const app = express(),
     store = new Store(options.dataDir);
   app.disable('x-powered-by');
+  // Behind the documented reverse proxy, identify clients by the address the proxy appended (one hop).
+  if (options.publicOrigin) app.set('trust proxy', 1);
   const loginAttempts = new Map<string, { count: number; until: number }>();
   for (const job of store.list<Job>('jobs'))
     if (job.status === 'running')
@@ -71,6 +73,7 @@ export function createApp(options: Options) {
   app.post('/api/login', (req, res) => {
     const key = req.ip || 'unknown';
     const now = Date.now();
+    for (const [ip, entry] of loginAttempts) if (entry.until <= now) loginAttempts.delete(ip);
     const rate = loginAttempts.get(key);
     if (rate && rate.until > now && rate.count >= 8) {
       res.status(429).json({ error: 'Too many attempts. Try again in ten minutes.' });
@@ -181,8 +184,12 @@ export function createApp(options: Options) {
     return paper;
   };
   app.get('/api/papers/:id', (req, res) => {
-    const paper = getPaper(req.params.id),
-      page = Number(req.query.page) || paper.currentPage;
+    const paper = getPaper(req.params.id);
+    const requested = Number(req.query.page);
+    const page =
+      Number.isInteger(requested) && requested >= 1 && requested <= paper.pages
+        ? requested
+        : paper.currentPage;
     res.json({
       paper: publicPaper(paper),
       messages: store.list<Message>('messages', paper.id),
@@ -317,14 +324,19 @@ export function createApp(options: Options) {
       res.json(existing);
       return;
     }
-    if (store.list<Job>('jobs', paper.id).some((j) => j.status === 'running')) {
-      res.status(409).json({ error: 'The tutor is still answering your previous question.' });
-      return;
-    }
-    if (store.list<Job>('jobs').filter((j) => j.status === 'running').length >= 2) {
-      res
-        .status(429)
-        .json({ error: 'The tutor is busy with two other questions. Try again shortly.' });
+    const busyReason = () => {
+      if (store.list<Job>('jobs', paper.id).some((j) => j.status === 'running'))
+        return { status: 409, error: 'The tutor is still answering your previous question.' };
+      if (store.list<Job>('jobs').filter((j) => j.status === 'running').length >= 2)
+        return {
+          status: 429,
+          error: 'The tutor is busy with two other questions. Try again shortly.',
+        };
+      return undefined;
+    };
+    let busy = busyReason();
+    if (busy) {
+      res.status(busy.status).json({ error: busy.error });
       return;
     }
     const status = await options.provider.status();
@@ -334,12 +346,14 @@ export function createApp(options: Options) {
     }
     const generation = await generationSettings();
     // Recheck after asynchronous auth discovery, to avoid concurrent double submissions.
-    if (store.get<Job>('jobs', input.requestId)) {
-      res.json(store.get<Job>('jobs', input.requestId));
+    const duplicate = store.get<Job>('jobs', input.requestId);
+    if (duplicate) {
+      res.json(duplicate);
       return;
     }
-    if (store.list<Job>('jobs', paper.id).some((j) => j.status === 'running')) {
-      res.status(409).json({ error: 'The tutor is still answering your previous question.' });
+    busy = busyReason();
+    if (busy) {
+      res.status(busy.status).json({ error: busy.error });
       return;
     }
     const now = new Date().toISOString();
@@ -370,7 +384,7 @@ export function createApp(options: Options) {
       store.put('messages', message.id, message, paper.id);
     });
     res.status(202).json(job);
-    void (async () => {
+    (async () => {
       try {
         const imagePath = await pageImage(store, paper, input.page);
         const result = resultSchema.parse(
@@ -453,22 +467,26 @@ export function createApp(options: Options) {
           );
         });
       } catch (error) {
-        store.put(
-          'jobs',
-          job.id,
-          {
-            ...job,
-            status: 'failed',
-            finishedAt: new Date().toISOString(),
-            error:
-              error instanceof Error
-                ? error.message
-                : 'The tutor could not finish. Please try again.',
-          },
-          paper.id,
-        );
+        try {
+          store.put(
+            'jobs',
+            job.id,
+            {
+              ...job,
+              status: 'failed',
+              finishedAt: new Date().toISOString(),
+              error:
+                error instanceof Error
+                  ? error.message
+                  : 'The tutor could not finish. Please try again.',
+            },
+            paper.id,
+          );
+        } catch (writeError) {
+          console.error('[margin] Could not record a failed tutor job', writeError);
+        }
       }
-    })();
+    })().catch((error) => console.error('[margin] Tutor job failed unexpectedly', error));
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'That endpoint does not exist.' }));
   app.use(

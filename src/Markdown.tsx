@@ -16,12 +16,16 @@ export default function Markdown({
         rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href, children }) => {
-            const page = href?.match(/^#page=(\d+)$/);
-            return page ? (
-              <button className="page-citation" onClick={() => onPage?.(Number(page[1]))}>
-                {children}
-              </button>
-            ) : (
+            const page = href?.match(/^#page=(\d+)/);
+            if (page)
+              return (
+                <button className="page-citation" onClick={() => onPage?.(Number(page[1]))}>
+                  {children}
+                </button>
+              );
+            // Other fragment links have nothing to open; never send them to a new tab.
+            if (!href || href.startsWith('#')) return <span>{children}</span>;
+            return (
               <a href={href} target="_blank" rel="noopener noreferrer">
                 {children}
               </a>

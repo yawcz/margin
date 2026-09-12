@@ -78,10 +78,31 @@ export default function App() {
     const value = await api<Detail>(`/papers/${id}?page=${pageRef.current}`);
     if (idRef.current === id) setDetail(value);
   }, []);
+  const [bootAttempt, setBootAttempt] = useState(0);
   useEffect(() => {
-    api<typeof session>('/session')
-      .then(setSession)
-      .catch((e) => setError(e.message));
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // A network blip on load should retry (1 s, 2 s, 4 s) before showing an error with Retry.
+    const load = async (attempt: number) => {
+      try {
+        const value = await api<typeof session>('/session');
+        if (!cancelled) setSession(value);
+      } catch (e) {
+        if (cancelled) return;
+        if (attempt < 3) timer = setTimeout(() => void load(attempt + 1), 1000 * 2 ** attempt);
+        else setError((e as Error).message);
+      }
+    };
+    void load(0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [bootAttempt]);
+  useEffect(() => {
+    const expired = () => setSession((s) => s && { ...s, authenticated: false });
+    window.addEventListener('margin:unauthenticated', expired);
+    return () => window.removeEventListener('margin:unauthenticated', expired);
   }, []);
   useEffect(() => {
     if (!session?.authenticated) return;
@@ -218,6 +239,17 @@ export default function App() {
       <div className="boot">
         <Logo />
         <p>{error || 'Opening your reading space…'}</p>
+        {error && (
+          <button
+            className="secondary"
+            onClick={() => {
+              setError('');
+              setBootAttempt((value) => value + 1);
+            }}
+          >
+            Retry
+          </button>
+        )}
       </div>
     );
   if (!session.authenticated)
@@ -563,6 +595,7 @@ export default function App() {
                 onNavigate={changePage}
                 selection={selection}
                 onSelection={setSelection}
+                asking={busy}
                 onExplain={() => void safeAsk('explain', 'Explain this passage.')}
               />
               <Tutor

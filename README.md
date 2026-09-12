@@ -4,7 +4,7 @@ A private paper reader with an adaptive tutor. Upload a PDF or import from arXiv
 
 ## Run locally
 
-Requires Node.js 24 or newer, Poppler (`pdftotext`, `pdfinfo`, `pdftoppm`), and a signed-in Codex CLI. The Codex adapter was exercised with version 0.153.4.
+Requires Node.js 24 or newer, Poppler (`pdftotext`, `pdfinfo`, `pdftoppm`), and a signed-in Codex CLI. The Codex adapter was exercised with version 0.154.0.
 
 ```bash
 # Debian/Ubuntu, if Poppler is missing:
@@ -44,12 +44,12 @@ On phones and portrait tablets, the **Paper / Tutor** bar switches between readi
 
 The application backend, PDFs, SQLite database, and Codex process run together. Phones and tablets only need access to the web reader. They do not receive provider credentials or need a Codex installation.
 
-Use a dedicated service user or the included container so Codex has its own account/configuration and does not inherit unrelated personal integrations. The server starts read-only tutor threads, disables shell/edit/agent-spawning features, and rejects agent-initiated approval requests. Reproduction and command execution are outside this version's scope.
+Use a dedicated service user or the included container so Codex has its own account/configuration and does not inherit unrelated personal integrations. The server starts read-only, ephemeral tutor threads with approvals set to deny, switches off every agent tool except web search (shell and unified exec, multi-agent, browser and computer use, apps, code mode, plugins, image tools, and the account's MCP servers), and rejects agent-initiated approval requests. Paper text is untrusted input; keeping this list current matters. The feature names were checked against Codex 0.154; run `codex features list` after upgrading Codex and compare with `server/codex.ts`. Reproduction and command execution are outside this version's scope.
 
 ### Container
 
 1. Install Docker with Compose. Copy this directory to the private server.
-2. Copy `.env.example` to `.env`. Set a unique `APP_PASSWORD` and your actual `PUBLIC_ORIGIN`, such as `https://margin.your-private-domain.example` (no trailing slash).
+2. Copy `.env.example` to `.env`. Set a unique `APP_PASSWORD` and your actual `PUBLIC_ORIGIN`, such as `https://margin.your-private-domain.example` (no trailing slash). Compose passes only `APP_PASSWORD`, `PUBLIC_ORIGIN`, `CODEX_MODEL`, and `TUTOR_TIMEOUT_MS` to the container; `HOST`, `PORT`, `NODE_ENV`, and `COOKIE_SECURE` are fixed by the image.
 3. Build and start:
 
 ```bash
@@ -80,9 +80,9 @@ If your reverse proxy is on another machine, adapt the bind/network configuratio
 
 The initial integration uses Codex with a ChatGPT login and its available models/usage allowances. Click the **model name and effort** beside Reply style to change them. Options come from the connected provider; only supported effort levels are offered. Choices persist across the library, and each new reply records the model and effort requested. Changing settings affects future requests. Text-only models receive extracted paper text without page images. API-key authentication instead follows API billing. This is not an integration with every ChatGPT web mode. Claude Max support is on the roadmap and needs its supported personal-integration authentication path checked when implemented.
 
-Before an explicit model selection is saved, Margin uses `CODEX_MODEL` if set, otherwise the effective Codex configuration/default. Existing libraries retain medium effort where supported. Saved choices override that initial default within Margin and do not change the server user's Codex configuration.
+Before an explicit model selection is saved, Margin uses `CODEX_MODEL` if set, otherwise the effective Codex configuration/default, otherwise the first model the provider lists. Existing libraries retain medium effort where supported. Saved choices override that initial default within Margin and do not change the server user's Codex configuration. A reply that takes longer than `TUTOR_TIMEOUT_MS` (default ten minutes) is interrupted on the provider and reported as a failed job; the question is preserved.
 
-For long papers, context is limited to approximately 160,000 characters, preferring initial pages, current/neighboring pages, references, and pages matching the question. The interface displays a notice, and the tutor receives an explicit list of included pages. The newest 24 conversation messages and 60 learning notes are supplied, alongside the library and reading-path decisions. This is an initial context-selection policy, not full-library semantic retrieval.
+Paper text is extracted in reading order. Papers imported by earlier builds used layout mode, which interleaves the columns of two-column papers; re-import those for better tutor context. For long papers, context is limited to approximately 160,000 characters, preferring initial pages, current/neighboring pages, references, and pages matching the question. The interface displays a notice, and the tutor receives an explicit list of included pages. The newest 24 conversation messages and 60 learning notes are supplied, alongside the library and reading-path decisions. This is an initial context-selection policy, not full-library semantic retrieval.
 
 The built-in profile is initialized from the background described during this project's design; edit it for another reader. Inferred notes are evidence, not a calibrated mastery score. You can inspect and correct them. Explanations and recommendations are model-generated; source links make them inspectable, but citation correctness is not independently guaranteed by the application.
 

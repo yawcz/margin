@@ -2351,3 +2351,45 @@ strong {
     font-size: 14px;
   }
 }
+
+/* Failed-job notice with a dismiss control. */
+.job-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* Page citations are small inline chips; give them a larger invisible hit area. */
+.page-citation {
+  position: relative;
+}
+.page-citation::before {
+  content: '';
+  position: absolute;
+  inset: -8px -6px;
+}
+/* Touch targets of at least 44px on phones and tablets. Declared last so it wins over the
+   narrower sizes set in the earlier breakpoint blocks. */
+@media (max-width: 899px) {
+  .icon-button,
+  .page-controls .icon-button,
+  .zoom-controls .icon-button,
+  .reader-heading > .icon-button,
+  .selection-bar > .icon-button,
+  .message-label button,
+  .rec-controls button,
+  .signal-footer button,
+  .answer-actions button,
+  .quick-actions button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .pdf-toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 48px;
+  }
+  .page-citation {
+    font-size: 12px;
+  }
+}

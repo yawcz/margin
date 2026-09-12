@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,9 +10,9 @@ import { TestProvider, samplePdf } from './fixtures.ts';
 import { paperContext, tutorPrompt } from '../server/tutor.ts';
 import type { StoredPaper } from '../server/store.ts';
 
-async function harness(password?: string, provider = new TestProvider()) {
+async function harness(password?: string, provider = new TestProvider(), publicOrigin?: string) {
   const dataDir = await mkdtemp(join(tmpdir(), 'margin-test-'));
-  let instance = createApp({ dataDir, provider, password });
+  let instance = createApp({ dataDir, provider, password, publicOrigin });
   let server: Server = instance.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   let root = `http://127.0.0.1:${(server.address() as any).port}/api`;
@@ -50,7 +50,7 @@ async function harness(password?: string, provider = new TestProvider()) {
     async restart() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       instance.close();
-      instance = createApp({ dataDir, provider, password });
+      instance = createApp({ dataDir, provider, password, publicOrigin });
       server = instance.app.listen(0, '127.0.0.1');
       await once(server, 'listening');
       root = `http://127.0.0.1:${(server.address() as any).port}/api`;
@@ -227,6 +227,11 @@ test('long-document selection explicitly labels the included context', () => {
   assert.match(context.notice, /supplied selectively/);
   assert.match(context.text, /PDF PAGE 50/);
   assert.ok(context.text.length < 165000);
+  // Out-of-range pages are clamped instead of looping forever over an unbounded range.
+  for (const page of [Infinity, -Infinity, NaN, 0, 9007199254740993, 1e308])
+    assert.match(paperContext(paper, page).notice, /supplied selectively/, String(page));
+  assert.match(paperContext(paper, 50, '', Infinity).text, /PDF PAGE 100/);
+  assert.match(paperContext(paper, 50, '', 20).text, /PDF PAGE 50/);
 });
 
 test('reply style survives restart, preserves the learner profile, and reaches the provider with the selected page range', async () => {
@@ -346,6 +351,125 @@ test('model and effort are validated, persist, and are captured when each reply 
     assert.equal((await h.call(`/papers/${paper.id}`)).value.messages.length, 4);
     assert.equal((await h.call('/generation', 'PUT', selected)).response.status, 200);
   } finally {
+    await h.close();
+  }
+});
+
+test('an out-of-range or non-numeric page query falls back to the saved position instead of hanging', async () => {
+  const h = await harness();
+  try {
+    const paper = await upload(h);
+    await h.call(`/papers/${paper.id}`, 'PATCH', { currentPage: 2 });
+    for (const page of [
+      'Infinity',
+      '-Infinity',
+      'NaN',
+      'abc',
+      '0',
+      '3',
+      '1.5',
+      '9007199254740993',
+    ]) {
+      const started = Date.now();
+      const { response, value } = await h.call(`/papers/${paper.id}?page=${page}`);
+      assert.equal(response.status, 200, page);
+      assert.match(value.pageText, /Checking the Idea/, page);
+      assert.ok(Date.now() - started < 2000, page);
+    }
+    assert.match((await h.call(`/papers/${paper.id}?page=1`)).value.pageText, /Concept Directions/);
+  } finally {
+    await h.close();
+  }
+});
+
+test('at most two tutor jobs run at once across the library, even for simultaneous requests', async () => {
+  const h = await harness(undefined, new TestProvider(300));
+  try {
+    const papers = [await upload(h), await upload(h), await upload(h)];
+    const results = await Promise.all(
+      papers.map((paper) =>
+        h.call(`/papers/${paper.id}/ask`, 'POST', {
+          requestId: crypto.randomUUID(),
+          action: 'chat',
+          question: 'Explain this.',
+          page: 1,
+        }),
+      ),
+    );
+    assert.deepEqual(results.map((r) => r.response.status).sort(), [202, 202, 429]);
+    for (const paper of papers) await finished(h, paper.id);
+    assert.equal(h.provider.calls.length, 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a disconnected provider is reported as a temporary failure, not a bad request', async () => {
+  const provider = new TestProvider();
+  provider.models = async () => {
+    throw Object.assign(new Error('Codex is not connected.'), { status: 503 });
+  };
+  const h = await harness(undefined, provider);
+  try {
+    const paper = await upload(h);
+    assert.equal((await h.call('/generation')).response.status, 503);
+    assert.equal(
+      (await h.call('/generation', 'PUT', { model: 'x', effort: 'low' })).response.status,
+      503,
+    );
+    const ask = await h.call(`/papers/${paper.id}/ask`, 'POST', {
+      requestId: crypto.randomUUID(),
+      action: 'chat',
+      question: 'Explain this.',
+      page: 1,
+    });
+    assert.equal(ask.response.status, 503);
+    assert.match(ask.value.error, /not connected/);
+    assert.equal((await h.call(`/papers/${paper.id}`)).value.messages.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('behind the reverse proxy, login throttling keys on the forwarded client address, not a forged hop', async () => {
+  const password = 'a-long-private-password';
+  const h = await harness(password, new TestProvider(), 'http://127.0.0.1');
+  try {
+    const attempt = (ip: string, value: string) =>
+      h.call('/login', 'POST', { password: value }, { 'X-Forwarded-For': ip });
+    for (let i = 0; i < 8; i++)
+      assert.equal((await attempt('10.0.0.1', 'wrong')).response.status, 401);
+    assert.equal((await attempt('10.0.0.1', password)).response.status, 429);
+    assert.equal((await attempt('10.0.0.2', password)).response.status, 200);
+    // Only the address appended by the proxy counts; a client-supplied hop cannot rotate the key.
+    assert.equal((await attempt('203.0.113.9, 10.0.0.1', password)).response.status, 429);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a storage failure while finishing a tutor job is logged instead of crashing the server', async () => {
+  const h = await harness(undefined, new TestProvider(60));
+  const log = mock.method(console, 'error', () => {});
+  try {
+    const paper = await upload(h);
+    const ask = await h.call(`/papers/${paper.id}/ask`, 'POST', {
+      requestId: crypto.randomUUID(),
+      action: 'chat',
+      question: 'Explain this.',
+      page: 1,
+    });
+    assert.equal(ask.response.status, 202);
+    const put = mock.method(h.store, 'put', () => {
+      throw new Error('disk full');
+    });
+    for (let i = 0; i < 100 && log.mock.callCount() === 0; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    put.mock.restore();
+    assert.ok(log.mock.callCount() > 0, 'the failure was logged');
+    assert.equal((await h.call(`/papers/${paper.id}`)).response.status, 200);
+  } finally {
+    log.mock.restore();
     await h.close();
   }
 });

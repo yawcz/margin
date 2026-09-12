@@ -8,6 +8,8 @@ services:
       APP_PASSWORD: ${APP_PASSWORD:?Set a private reader password in .env}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the HTTPS origin of your private reader in .env}
       COOKIE_SECURE: 'true'
+      CODEX_MODEL: ${CODEX_MODEL:-}
+      TUTOR_TIMEOUT_MS: ${TUTOR_TIMEOUT_MS:-}
     volumes:
       - margin-data:/app/data
       - margin-codex:/home/node/.codex

@@ -57,6 +57,8 @@ export default function Tutor({
   const [question, setQuestion] = useState('');
   const [localError, setLocalError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState<'model' | 'style' | null>(null);
+  const [optOutId, setOptOutId] = useState('');
+  const [dismissedJob, setDismissedJob] = useState('');
   const bottom = useRef<HTMLDivElement>(null);
   const newest = useRef<HTMLElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
@@ -79,12 +81,14 @@ export default function Tutor({
     return () => observer.disconnect();
   }, [latest?.id, latest?.role, busy, tab]);
   const quizPending = latest?.role === 'assistant' && latest.action === 'quiz';
+  // The first message after a quiz is graded unless the reader opts out for that quiz.
+  const answeringQuiz = quizPending && optOutId !== latest?.id;
   const send = async () => {
     if (!question.trim() || busy) return;
     const text = question;
     setQuestion('');
     try {
-      await onAsk(quizPending ? 'feedback' : 'chat', text);
+      await onAsk(answeringQuiz ? 'feedback' : 'chat', text);
     } catch {
       setQuestion(text);
     }
@@ -94,6 +98,14 @@ export default function Tutor({
     void onAsk(kind, text).catch(() => {});
   };
   const latestJob = jobs.at(-1);
+  const lastReplyAt = messages.findLast((m) => m.role === 'assistant')?.createdAt ?? '';
+  // Only a failure newer than the last reply matters, and the reader can dismiss it.
+  const failedJob =
+    latestJob?.status === 'failed' &&
+    latestJob.createdAt > lastReplyAt &&
+    latestJob.id !== dismissedJob
+      ? latestJob
+      : undefined;
   const dismiss = async (message: Message) => {
     try {
       await api(`/messages/${message.id}`, json('PATCH', { quizDismissed: true }));
@@ -304,11 +316,22 @@ export default function Tutor({
                 </div>
               </div>
             )}
-            {(error || localError || latestJob?.status === 'failed') && (
+            {error || localError ? (
               <div className="error-banner" role="alert">
-                {error || localError || latestJob?.error}
+                {error || localError}
               </div>
-            )}
+            ) : failedJob ? (
+              <div className="error-banner job-error" role="alert">
+                <span>{failedJob.error}</span>
+                <button
+                  className="icon-button"
+                  aria-label="Dismiss"
+                  onClick={() => setDismissedJob(failedJob.id)}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ) : null}
             <div ref={bottom} />
           </div>
           <div className="composer-area">
@@ -359,7 +382,7 @@ export default function Tutor({
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 placeholder={
-                  quizPending ? 'Work through your answer…' : 'What would you like to understand?'
+                  answeringQuiz ? 'Work through your answer…' : 'What would you like to understand?'
                 }
                 rows={2}
                 onKeyDown={(e) => {
@@ -379,6 +402,18 @@ export default function Tutor({
                   {selection
                     ? `Selected passage · ${pageLabel(selection.page, selection.endPage)}`
                     : `Paper context · page ${page}`}
+                  {quizPending && (
+                    <>
+                      {' · '}
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => setOptOutId(answeringQuiz ? (latest?.id ?? '') : '')}
+                      >
+                        {answeringQuiz ? 'Ask something else instead' : 'Answer the quiz'}
+                      </button>
+                    </>
+                  )}
                 </span>
                 <button
                   className="send-button"
