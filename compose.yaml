@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:4317:4317'
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Set a private reader password in .env}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the HTTPS origin of your private reader in .env}
+      COOKIE_SECURE: 'true'
+    volumes:
+      - margin-data:/app/data
+      - margin-codex:/home/node/.codex
+volumes:
+  margin-data:
+  margin-codex:
