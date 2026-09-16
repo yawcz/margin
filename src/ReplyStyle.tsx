@@ -17,22 +17,34 @@ export default function ReplyStyle({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
     void api<Profile>('/profile')
       .then((profile) => {
+        if (cancelled) return;
         setStyle({
           replyLength: profile.replyLength,
           replyInstructions: profile.replyInstructions,
         });
         setSavedLength(profile.replyLength);
         setLoading(false);
+        setLoaded(true);
       })
       .catch((e) => {
+        if (cancelled) return;
         setError(e.message);
         setLoading(false);
       });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt]);
   const save = async () => {
+    if (!loaded) return;
     setSaving(true);
     setError('');
     try {
@@ -63,7 +75,7 @@ export default function ReplyStyle({
             Answer length
             <select
               value={style.replyLength}
-              disabled={loading || saving}
+              disabled={!loaded || loading || saving}
               onChange={(e) => setStyle({ ...style, replyLength: e.target.value as ReplyLength })}
             >
               <option value="concise">Concise · a few sentences</option>
@@ -76,7 +88,7 @@ export default function ReplyStyle({
             <textarea
               rows={3}
               maxLength={2000}
-              disabled={loading || saving}
+              disabled={!loaded || loading || saving}
               value={style.replyInstructions}
               onChange={(e) => setStyle({ ...style, replyInstructions: e.target.value })}
             />
@@ -87,7 +99,7 @@ export default function ReplyStyle({
           </p>
           <button
             className="primary small"
-            disabled={loading || saving}
+            disabled={!loaded || loading || saving}
             onClick={() => void save()}
           >
             {saving ? 'Saving…' : 'Save reply style'}
@@ -97,6 +109,11 @@ export default function ReplyStyle({
       {error && (
         <div className="error-banner" role="alert">
           {error}
+          {!loaded && (
+            <button disabled={loading} onClick={() => setAttempt((value) => value + 1)}>
+              Retry reply style
+            </button>
+          )}
         </div>
       )}
     </div>

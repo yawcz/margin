@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { Store, publicPaper, type StoredPaper } from './store.ts';
@@ -20,6 +20,27 @@ const uuid = z.string().uuid();
 export function createApp(options: Options) {
   const app = express(),
     store = new Store(options.dataDir);
+  const passwordVersion = store.get<{ salt: string; digest: string }>('settings', 'password');
+  const salt = passwordVersion?.salt ?? randomBytes(32).toString('hex');
+  const digest = scryptSync(options.password ?? '', salt, 32).toString('hex');
+  if (passwordVersion?.digest !== digest)
+    store.transaction(() => {
+      store.db.exec('DELETE FROM sessions');
+      store.put('settings', 'password', { salt, digest });
+    });
+  const terminalJobs = new Map<string, Job>();
+  const flushTerminalJobs = () => {
+    for (const job of terminalJobs.values()) {
+      try {
+        store.put('jobs', job.id, job, job.paperId);
+        terminalJobs.delete(job.id);
+      } catch {
+        break;
+      }
+    }
+  };
+  const recoveryTimer = setInterval(flushTerminalJobs, 1000);
+  recoveryTimer.unref();
   app.disable('x-powered-by');
   // Behind the documented reverse proxy, identify clients by the address the proxy appended (one hop).
   if (options.publicOrigin) app.set('trust proxy', 1);
@@ -37,6 +58,13 @@ export function createApp(options: Options) {
         },
         job.paperId,
       );
+  app.use((req, res, next) => {
+    if (!options.password && !['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) {
+      res.status(403).json({ error: 'This host is not allowed for a local reader.' });
+      return;
+    }
+    next();
+  });
   app.use(express.json({ limit: '100kb' }));
   app.use('/api', (_req, res, next) => {
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -51,6 +79,7 @@ export function createApp(options: Options) {
         return;
       }
     }
+    flushTerminalJobs();
     next();
   });
   const sessionValid = (req: express.Request) => {
@@ -348,6 +377,10 @@ export function createApp(options: Options) {
     // Recheck after asynchronous auth discovery, to avoid concurrent double submissions.
     const duplicate = store.get<Job>('jobs', input.requestId);
     if (duplicate) {
+      if (duplicate.paperId !== paper.id) {
+        res.status(409).json({ error: 'That request identifier is already in use.' });
+        return;
+      }
       res.json(duplicate);
       return;
     }
@@ -432,6 +465,7 @@ export function createApp(options: Options) {
             );
           }
           const old = store.list<Recommendation>('recommendations', paper.id);
+          const seenUrls = new Set(old.map((recommendation) => recommendation.url));
           let position = old.length;
           for (const recommendation of result.recommendations) {
             let parsed: URL;
@@ -440,11 +474,9 @@ export function createApp(options: Options) {
             } catch {
               continue;
             }
-            if (
-              !['https:', 'http:'].includes(parsed.protocol) ||
-              old.some((r) => r.url === recommendation.url)
-            )
+            if (!['https:', 'http:'].includes(parsed.protocol) || seenUrls.has(recommendation.url))
               continue;
+            seenUrls.add(recommendation.url);
             const id = randomUUID();
             store.put(
               'recommendations',
@@ -467,22 +499,19 @@ export function createApp(options: Options) {
           );
         });
       } catch (error) {
+        const failed: Job = {
+          ...job,
+          status: 'failed',
+          finishedAt: new Date().toISOString(),
+          error:
+            error instanceof Error
+              ? error.message
+              : 'The tutor could not finish. Please try again.',
+        };
         try {
-          store.put(
-            'jobs',
-            job.id,
-            {
-              ...job,
-              status: 'failed',
-              finishedAt: new Date().toISOString(),
-              error:
-                error instanceof Error
-                  ? error.message
-                  : 'The tutor could not finish. Please try again.',
-            },
-            paper.id,
-          );
+          store.put('jobs', job.id, failed, paper.id);
         } catch (writeError) {
+          terminalJobs.set(job.id, failed);
           console.error('[margin] Could not record a failed tutor job', writeError);
         }
       }
@@ -515,6 +544,8 @@ export function createApp(options: Options) {
     app,
     store,
     close: () => {
+      clearInterval(recoveryTimer);
+      flushTerminalJobs();
       options.provider.close();
       store.close();
     },

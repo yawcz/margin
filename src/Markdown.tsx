@@ -15,6 +15,7 @@ export default function Markdown({
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          img: ({ alt }) => <span>{alt || '[Image omitted]'}</span>,
           a: ({ href, children }) => {
             const page = href?.match(/^#page=(\d+)/);
             if (page)

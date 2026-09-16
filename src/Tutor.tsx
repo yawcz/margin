@@ -27,7 +27,10 @@ import ReplyStyle from './ReplyStyle';
 import ModelSettings from './ModelSettings';
 import { api, json } from './api';
 
+export type Draft = { text: string; failed: string };
 type Props = {
+  draft: Draft;
+  onDraftChange: (update: (current: Draft) => Draft) => void;
   messages: Message[];
   recommendations: Recommendation[];
   jobs: Job[];
@@ -37,10 +40,12 @@ type Props = {
   busy: boolean;
   error: string;
   onAsk: (action: Action, question: string, context?: QuestionContext) => Promise<void>;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onPage: (page: number) => void;
 };
 export default function Tutor({
+  draft,
+  onDraftChange,
   messages,
   recommendations,
   jobs,
@@ -54,7 +59,8 @@ export default function Tutor({
   onPage,
 }: Props) {
   const [tab, setTab] = useState<'conversation' | 'reading'>('conversation');
-  const [question, setQuestion] = useState('');
+  const question = draft.text;
+  const setQuestion = (text: string) => onDraftChange((current) => ({ ...current, text }));
   const [localError, setLocalError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState<'model' | 'style' | null>(null);
   const [optOutId, setOptOutId] = useState('');
@@ -90,7 +96,11 @@ export default function Tutor({
     try {
       await onAsk(answeringQuiz ? 'feedback' : 'chat', text);
     } catch {
-      setQuestion(text);
+      onDraftChange((current) =>
+        current.text
+          ? { ...current, failed: [current.failed, text].filter(Boolean).join('\n\n') }
+          : { ...current, text },
+      );
     }
   };
   const action = (kind: Action, text: string) => {
@@ -107,17 +117,19 @@ export default function Tutor({
       ? latestJob
       : undefined;
   const dismiss = async (message: Message) => {
+    setLocalError('');
     try {
       await api(`/messages/${message.id}`, json('PATCH', { quizDismissed: true }));
-      onRefresh();
+      await onRefresh();
     } catch (e) {
       setLocalError((e as Error).message);
     }
   };
   const update = async (rec: Recommendation, status: Recommendation['status']) => {
+    setLocalError('');
     try {
       await api(`/recommendations/${rec.id}`, json('PATCH', { status }));
-      onRefresh();
+      await onRefresh();
     } catch (e) {
       setLocalError((e as Error).message);
     }
@@ -149,6 +161,11 @@ export default function Tutor({
           {recommendations.length > 0 && <span className="count">{recommendations.length}</span>}
         </button>
       </div>
+      {tab === 'reading' && localError && (
+        <div className="error-banner" role="alert">
+          {localError}
+        </div>
+      )}
       {tab === 'conversation' ? (
         <>
           <div className="tutor-settings">
@@ -335,6 +352,22 @@ export default function Tutor({
             <div ref={bottom} />
           </div>
           <div className="composer-area">
+            {draft.failed && (
+              <details>
+                <summary>Unsent question</summary>
+                <p>{draft.failed}</p>
+                <button
+                  onClick={() =>
+                    onDraftChange((current) => ({
+                      text: [current.failed, current.text].filter(Boolean).join('\n\n'),
+                      failed: '',
+                    }))
+                  }
+                >
+                  Restore unsent question
+                </button>
+              </details>
+            )}
             <div className="quick-actions">
               <button
                 disabled={busy}

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Server } from 'node:http';
+import { request, type Server } from 'node:http';
 import { once } from 'node:events';
 import { createApp } from '../server/app.ts';
 import { TestProvider, samplePdf } from './fixtures.ts';
@@ -47,9 +47,10 @@ async function harness(password?: string, provider = new TestProvider(), publicO
     get store() {
       return instance.store;
     },
-    async restart() {
+    async restart(nextPassword = password) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       instance.close();
+      password = nextPassword;
       instance = createApp({ dataDir, provider, password, publicOrigin });
       server = instance.app.listen(0, '127.0.0.1');
       await once(server, 'listening');
@@ -470,6 +471,135 @@ test('a storage failure while finishing a tutor job is logged instead of crashin
     assert.equal((await h.call(`/papers/${paper.id}`)).response.status, 200);
   } finally {
     log.mock.restore();
+    await h.close();
+  }
+});
+
+test('recovered storage persists failed jobs and releases their concurrency slots', async () => {
+  const h = await harness(undefined, new TestProvider(60));
+  const log = mock.method(console, 'error', () => {});
+  try {
+    const paper = await upload(h);
+    const input = { requestId: crypto.randomUUID(), action: 'chat', question: 'Explain.', page: 1 };
+    assert.equal((await h.call(`/papers/${paper.id}/ask`, 'POST', input)).response.status, 202);
+    const put = mock.method(h.store, 'put', () => {
+      throw new Error('disk full');
+    });
+    try {
+      for (let i = 0; i < 100 && log.mock.callCount() === 0; i++)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.ok(log.mock.callCount() > 0);
+    } finally {
+      put.mock.restore();
+    }
+    const detail = await finished(h, paper.id);
+    assert.equal(detail.jobs[0].status, 'failed');
+    assert.match(detail.jobs[0].error, /disk full/);
+    assert.equal(detail.messages.length, 1);
+    assert.equal(
+      (
+        await h.call(`/papers/${paper.id}/ask`, 'POST', {
+          ...input,
+          requestId: crypto.randomUUID(),
+        })
+      ).response.status,
+      202,
+    );
+    assert.equal((await finished(h, paper.id)).jobs.at(-1).status, 'complete');
+  } finally {
+    log.mock.restore();
+    await h.close();
+  }
+});
+
+test('simultaneous request IDs cannot return another paper’s job', async () => {
+  const provider = new TestProvider();
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requests = 0;
+  const status = provider.status.bind(provider);
+  provider.status = async () => {
+    if (++requests === 2) release();
+    await ready;
+    return status();
+  };
+  const h = await harness(undefined, provider);
+  try {
+    const papers = [await upload(h), await upload(h)];
+    const input = { requestId: crypto.randomUUID(), action: 'chat', question: 'Explain.', page: 1 };
+    const results = await Promise.all(
+      papers.map((paper) => h.call(`/papers/${paper.id}/ask`, 'POST', input)),
+    );
+    assert.deepEqual(results.map((result) => result.response.status).sort(), [202, 409]);
+    for (const [index, result] of results.entries())
+      if (result.response.status === 202) {
+        assert.equal(result.value.paperId, papers[index].id);
+        await finished(h, papers[index].id);
+      }
+  } finally {
+    await h.close();
+  }
+});
+
+test('duplicate recommendations within one answer are stored only once', async () => {
+  const provider = new TestProvider();
+  const answer = provider.answer.bind(provider);
+  provider.answer = async (request) => {
+    const result = await answer(request);
+    return { ...result, recommendations: [...result.recommendations, ...result.recommendations] };
+  };
+  const h = await harness(undefined, provider);
+  try {
+    const paper = await upload(h);
+    for (let i = 0; i < 2; i++) {
+      await h.call(`/papers/${paper.id}/ask`, 'POST', {
+        requestId: crypto.randomUUID(),
+        action: 'chat',
+        question: 'Explain.',
+        page: 1,
+      });
+      assert.equal((await finished(h, paper.id)).recommendations.length, 1);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('password rotation invalidates existing sessions', async () => {
+  const h = await harness('original-test-password');
+  try {
+    const login = await h.call('/login', 'POST', { password: 'original-test-password' });
+    h.setCookie(login.response.headers.get('set-cookie')!.split(';')[0]);
+    await h.restart('replacement-test-password');
+    assert.equal((await h.call('/papers')).response.status, 401);
+    const replacement = await h.call('/login', 'POST', { password: 'replacement-test-password' });
+    h.setCookie(replacement.response.headers.get('set-cookie')!.split(';')[0]);
+    assert.equal((await h.call('/papers')).response.status, 200);
+    await h.restart();
+    assert.equal((await h.call('/papers')).response.status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test('passwordless requests reject non-loopback hostnames', async () => {
+  const h = await harness();
+  const status = (host: string) =>
+    new Promise<number>((resolve, reject) => {
+      request(`${h.root}/papers`, { headers: { Host: host } }, (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      })
+        .on('error', reject)
+        .end();
+    });
+  try {
+    assert.equal(await status('untrusted.example'), 403);
+    assert.equal(await status('localhost'), 200);
+    assert.equal(await status('[::1]'), 200);
+  } finally {
     await h.close();
   }
 });

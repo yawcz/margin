@@ -107,9 +107,9 @@ test('Codex discovers paginated effort options and sends the selected model, eff
       false,
     );
     assert.equal(
-      recorded.filter((c) => c.method === 'thread/archive').length,
+      recorded.filter((c) => c.method === 'thread/unsubscribe').length,
       2,
-      'each completed turn archives its thread',
+      'each completed turn releases its ephemeral thread',
     );
   } finally {
     provider.close();
@@ -144,7 +144,7 @@ test('a Codex hang-up rejects the pending answer with a retryable error and does
   }
 });
 
-test('a stalled turn is interrupted and its thread archived after the tutor timeout', async () => {
+test('a stalled turn is interrupted and its thread released after the tutor timeout', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'margin-codex-stall-'));
   const binary = await fixture(dir, 'codex-stall.mjs');
   const store = new Store(dir);
@@ -157,14 +157,14 @@ test('a stalled turn is interrupted and its thread archived after the tutor time
     );
     assert.ok(Date.now() - started < 5000, 'the configured timeout is honoured');
     let recorded = await calls(dir);
-    for (let i = 0; i < 100 && !recorded.some((c) => c.method === 'thread/archive'); i++) {
+    for (let i = 0; i < 100 && !recorded.some((c) => c.method === 'thread/unsubscribe'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 20));
       recorded = await calls(dir);
     }
     const methods = recorded.map((c) => c.method);
     assert.ok(methods.includes('turn/start'));
     assert.ok(methods.indexOf('turn/interrupt') > methods.indexOf('turn/start'));
-    assert.ok(methods.indexOf('thread/archive') > methods.indexOf('turn/interrupt'));
+    assert.ok(methods.indexOf('thread/unsubscribe') > methods.indexOf('turn/interrupt'));
     assert.deepEqual(recorded.find((c) => c.method === 'turn/interrupt').params, {
       threadId: 'stalled-thread',
       turnId: 'turn-1',
@@ -179,3 +179,54 @@ test('a stalled turn is interrupted and its thread archived after the tutor time
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a turn acknowledged after timeout is still interrupted and released', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'margin-codex-late-'));
+  const binary = await fixture(dir, 'codex-stall.mjs');
+  await writeFile(join(dir, 'delay-turn'), '');
+  const store = new Store(dir);
+  const provider = new CodexProvider(dir, binary, 100);
+  try {
+    await assert.rejects(
+      provider.answer({ ...sampleRequest(store), generation: undefined }),
+      /took too long/,
+    );
+    let recorded = await calls(dir);
+    for (let i = 0; i < 100 && !recorded.some((call) => call.method === 'turn/interrupt'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      recorded = await calls(dir);
+    }
+    assert.deepEqual(recorded.find((call) => call.method === 'turn/interrupt')?.params, {
+      threadId: 'stalled-thread',
+      turnId: 'turn-1',
+    });
+    assert.ok(recorded.some((call) => call.method === 'thread/unsubscribe'));
+  } finally {
+    provider.close();
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ['rejected', 'timed out']) {
+  test(`${mode} initialization terminates its process without disrupting its replacement`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'margin-codex-restart-'));
+    const binary = await fixture(dir, 'codex-restart.mjs');
+    if (mode === 'timed out') await writeFile(join(dir, 'timeout-initialize'), '');
+    const provider = new CodexProvider(dir, binary, 1000, 150);
+    try {
+      assert.equal((await provider.status()).available, false);
+      assert.equal((await provider.status()).authenticated, true);
+      let lifecycle = '';
+      for (let i = 0; i < 100 && !lifecycle.includes('exited'); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        lifecycle = await readFile(join(dir, 'lifecycle.jsonl'), 'utf8').catch(() => '');
+      }
+      assert.match(lifecycle, /terminating\nexited/);
+      assert.equal((await provider.status()).authenticated, true);
+    } finally {
+      provider.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}

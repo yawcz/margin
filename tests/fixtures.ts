@@ -128,6 +128,25 @@ export function samplePdf(): Buffer {
       (text) => `<< /Length ${Buffer.byteLength(text)} >>\nstream\n${text}\nendstream`,
     ),
   ];
+  return pdfFromObjects(objects);
+}
+
+export function multilingualPdf(): Buffer {
+  const contents =
+    'BT /F2 14 Tf 55 750 Td (Multilingual selection regression fixture.) Tj 0 -35 Td /F1 18 Tf <65E5672C8A9E> Tj ET';
+  return pdfFromObjects([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 8 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${Buffer.byteLength(contents)} >>\nstream\n${contents}\nendstream`,
+    '<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiMin-W3 /Encoding /UniJIS-UTF16-H /DescendantFonts [6 0 R] >>',
+    '<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HeiseiMin-W3 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 5 >> /FontDescriptor 7 0 R /DW 1000 >>',
+    '<< /Type /FontDescriptor /FontName /HeiseiMin-W3 /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]);
+}
+
+function pdfFromObjects(objects: string[]): Buffer {
   let pdf = '%PDF-1.4\n';
   const offsets = [0];
   for (const [i, object] of objects.entries()) {
