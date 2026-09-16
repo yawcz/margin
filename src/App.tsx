@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { api, json } from './api';
+import type { Draft } from './Tutor';
 import type {
   Action,
   AgentStatus,
@@ -57,26 +58,43 @@ export default function App() {
   const [error, setError] = useState('');
   const [askError, setAskError] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [asking, setAsking] = useState(false);
+  const [askingPaper, setAskingPaper] = useState('');
+  const submitting = useRef(new Set<string>());
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [showImport, setShowImport] = useState(false);
   const [arxiv, setArxiv] = useState('');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const fileInput = useRef<HTMLInputElement>(null);
+  const importDialog = useRef<HTMLDialogElement>(null);
+  const detailEpoch = useRef(0);
+  const detailRequest = useRef(0);
+  const detailApplied = useRef(0);
+  const libraryRequest = useRef(0);
+  const libraryApplied = useRef(0);
   const pageSaves = useRef(Promise.resolve());
   const pageRef = useRef(page);
   pageRef.current = page;
   const idRef = useRef(paperId);
   idRef.current = paperId;
   const refreshLibrary = useCallback(async () => {
+    const request = ++libraryRequest.current;
     const values = await api<Paper[]>('/papers');
-    setPapers(values);
+    if (request > libraryApplied.current) {
+      libraryApplied.current = request;
+      setPapers(values);
+    }
   }, []);
   const refreshDetail = useCallback(async () => {
     const id = idRef.current;
     if (!id) return;
+    const epoch = detailEpoch.current;
+    const request = ++detailRequest.current;
     const value = await api<Detail>(`/papers/${id}?page=${pageRef.current}`);
-    if (idRef.current === id) setDetail(value);
+    if (idRef.current === id && epoch === detailEpoch.current && request > detailApplied.current) {
+      detailApplied.current = request;
+      setDetail(value);
+    }
   }, []);
   const [bootAttempt, setBootAttempt] = useState(0);
   useEffect(() => {
@@ -100,23 +118,40 @@ export default function App() {
     };
   }, [bootAttempt]);
   useEffect(() => {
-    const expired = () => setSession((s) => s && { ...s, authenticated: false });
+    const expired = () => {
+      detailEpoch.current++;
+      libraryApplied.current = ++libraryRequest.current;
+      setSession((s) => s && { ...s, authenticated: false });
+    };
     window.addEventListener('margin:unauthenticated', expired);
     return () => window.removeEventListener('margin:unauthenticated', expired);
   }, []);
   useEffect(() => {
     if (!session?.authenticated) return;
     void refreshLibrary().catch((e) => setError(e.message));
-    void api<AgentStatus>('/agent').then(setAgent);
+    void api<AgentStatus>('/agent')
+      .then(setAgent)
+      .catch(() => {});
   }, [session?.authenticated, refreshLibrary]);
   useEffect(() => {
-    if (!paperId) return;
+    if (!paperId || !session?.authenticated) return;
     void refreshDetail().catch((e) => setError(e.message));
     const timer = setInterval(() => {
       void refreshDetail().catch(() => {});
     }, 2500);
     return () => clearInterval(timer);
-  }, [paperId, refreshDetail]);
+  }, [paperId, session?.authenticated, refreshDetail]);
+  useEffect(() => {
+    const dialog = importDialog.current;
+    if (!showImport || !session?.authenticated || !dialog) return;
+    const opener = document.activeElement;
+    dialog.showModal();
+    dialog.querySelector('input')?.focus();
+    return () => {
+      dialog.close();
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, [showImport, session?.authenticated]);
   useEffect(() => {
     const onFocus = () => {
       if (session?.authenticated) {
@@ -131,6 +166,7 @@ export default function App() {
     return () => window.removeEventListener('focus', onFocus);
   }, [session?.authenticated, refreshLibrary, refreshDetail]);
   const openPaper = (paper: Paper) => {
+    detailEpoch.current++;
     setPaperId(paper.id);
     idRef.current = paper.id;
     setDetail(undefined);
@@ -186,14 +222,17 @@ export default function App() {
       setUploading(false);
     }
   };
-  const busy = asking || !!detail?.jobs.some((j) => j.status === 'running');
+  const busy = askingPaper === paperId || !!detail?.jobs.some((j) => j.status === 'running');
   const ask = async (action: Action, question: string, context?: QuestionContext) => {
-    if (!paperId || busy) return;
-    setAsking(true);
+    if (!paperId || busy || submitting.current.has(paperId))
+      throw new Error('A question is already being sent.');
+    const epoch = detailEpoch.current;
+    submitting.current.add(paperId);
+    setAskingPaper(paperId);
     setAskError('');
     setMobilePanel('tutor');
     try {
-      await api(
+      const job = await api<Job>(
         `/papers/${paperId}/ask`,
         json('POST', {
           requestId: crypto.randomUUID(),
@@ -204,12 +243,24 @@ export default function App() {
           endPage: context ? (context.endPage ?? context.page) : (selection?.endPage ?? page),
         }),
       );
-      await refreshDetail();
+      if (idRef.current === paperId && epoch === detailEpoch.current) {
+        detailApplied.current = ++detailRequest.current;
+        setDetail(
+          (current) =>
+            current && {
+              ...current,
+              jobs: [...current.jobs.filter((item) => item.id !== job.id), job],
+            },
+        );
+        void refreshDetail().catch(() => {});
+      }
     } catch (e) {
-      setAskError((e as Error).message);
+      if (idRef.current === paperId && epoch === detailEpoch.current)
+        setAskError((e as Error).message);
       throw e;
     } finally {
-      setAsking(false);
+      submitting.current.delete(paperId);
+      setAskingPaper((current) => (current === paperId ? '' : current));
     }
   };
   const safeAsk = async (action: Action, question: string, context?: QuestionContext) => {
@@ -329,6 +380,8 @@ export default function App() {
               aria-label="Sign out"
               onClick={async () => {
                 await api('/logout', json('POST'));
+                detailEpoch.current++;
+                libraryApplied.current = ++libraryRequest.current;
                 setSession({ authenticated: false, passwordRequired: true });
                 setDetail(undefined);
               }}
@@ -599,6 +652,14 @@ export default function App() {
                 onExplain={() => void safeAsk('explain', 'Explain this passage.')}
               />
               <Tutor
+                key={paperId}
+                draft={drafts[paperId] ?? { text: '', failed: '' }}
+                onDraftChange={(update) =>
+                  setDrafts((current) => ({
+                    ...current,
+                    [paperId]: update(current[paperId] ?? { text: '', failed: '' }),
+                  }))
+                }
                 messages={detail.messages}
                 recommendations={detail.recommendations}
                 jobs={detail.jobs}
@@ -608,7 +669,7 @@ export default function App() {
                 busy={busy}
                 error={askError}
                 onAsk={ask}
-                onRefresh={() => void refreshDetail()}
+                onRefresh={refreshDetail}
                 onPage={(p) => {
                   changePage(p);
                   setMobilePanel('paper');
@@ -636,18 +697,19 @@ export default function App() {
         </>
       )}
       {showImport && (
-        <div
+        <dialog
+          ref={importDialog}
           className="modal-backdrop"
+          aria-labelledby="import-title"
+          onCancel={(e) => {
+            e.preventDefault();
+            if (!uploading) setShowImport(false);
+          }}
           onClick={(e) => {
             if (e.target === e.currentTarget && !uploading) setShowImport(false);
           }}
         >
-          <section
-            className="import-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="import-title"
-          >
+          <section className="import-modal">
             <button
               className="icon-button modal-close"
               aria-label="Close import"
@@ -679,7 +741,6 @@ export default function App() {
                 <div className="link-input">
                   <Link size={17} />
                   <input
-                    autoFocus
                     placeholder="https://arxiv.org/abs/2311.03658"
                     value={arxiv}
                     onChange={(e) => setArxiv(e.target.value)}
@@ -698,7 +759,7 @@ export default function App() {
               </div>
             )}
           </section>
-        </div>
+        </dialog>
       )}
     </div>
   );

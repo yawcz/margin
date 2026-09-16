@@ -23,8 +23,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(resolve('dist')));
   app.get('/{*path}', (_req, res) => res.sendFile(resolve('dist/index.html')));
 } else {
-  const { createServer } = await import('vite');
-  const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
+  const { createDevServer } = await import('./dev.ts');
+  const vite = await createDevServer(dataDir);
   app.use(vite.middlewares);
 }
 const port = Number(process.env.PORT || 4317);

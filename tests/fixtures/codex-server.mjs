@@ -7,6 +7,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   const { id, method, params } = JSON.parse(line);
   if (id === undefined) return;
   appendFileSync('calls.jsonl', JSON.stringify({ method, params }) + '\n');
+  if (method === 'thread/archive') {
+    send({ id, error: { code: -32600, message: 'Ephemeral threads cannot be archived.' } });
+    return;
+  }
   let result = {};
   if (method === 'model/list')
     result = params.cursor

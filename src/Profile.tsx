@@ -10,7 +10,9 @@ export default function Profile() {
   const [assessment, setAssessment] = useState('');
   const refresh = () =>
     api<ProfileData>('/profile')
-      .then(setProfile)
+      .then((value) =>
+        setProfile((current) => (current ? { ...current, signals: value.signals } : value)),
+      )
       .catch((e) => setError(e.message));
   useEffect(() => {
     void refresh();
@@ -111,6 +113,7 @@ export default function Profile() {
                     {editing === signal.id ? (
                       <>
                         <textarea
+                          aria-label={`Assessment for ${signal.concept}`}
                           value={assessment}
                           onChange={(e) => setAssessment(e.target.value)}
                           rows={3}

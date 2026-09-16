@@ -86,7 +86,13 @@ export default function PdfReader({
       if (renderError)
         setError('Some text could not be prepared for selection. Try reloading the paper.');
     });
-    const task = getDocument({ url: `/api/papers/${paper.id}/pdf` });
+    const task = getDocument({
+      url: `/api/papers/${paper.id}/pdf`,
+      cMapUrl: '/pdfjs/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: '/pdfjs/standard_fonts/',
+      wasmUrl: '/pdfjs/wasm/',
+    });
     void task.promise
       .then((pdf) => {
         if (!stopped) reader.setDocument(pdf);
@@ -154,7 +160,10 @@ export default function PdfReader({
           part.selectNodeContents(layer);
           if (p === firstPage) part.setStart(range.startContainer, range.startOffset);
           if (p === lastPage) part.setEnd(range.endContainer, range.endOffset);
-          parts.push(part.toString().trim());
+          const fragment = part.cloneContents();
+          for (const br of fragment.querySelectorAll('br'))
+            br.replaceWith(document.createTextNode('\n'));
+          parts.push(fragment.textContent?.trim() ?? '');
         }
         const text = parts.join('\n\n').trim();
         if (text.length > 1)
